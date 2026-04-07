@@ -1,0 +1,7 @@
+__pycache__
+Utils/ASR/epoch_00080.pth
+*.pth
+Data/
+pretrained_data_vi.py
+prepare_data_vi.py
+inference_vi_pro.py
