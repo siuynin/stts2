@@ -429,7 +429,7 @@ class Decoder(nn.Module):
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, upsample_initial_channel, style_dim, upsample=True))
 
         self.F0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
         
