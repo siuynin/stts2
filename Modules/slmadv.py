@@ -4,11 +4,10 @@ import torch.nn.functional as F
 
 class SLMAdversarialLoss(torch.nn.Module):
 
-    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5):
+    def __init__(self, model, wl, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5):
         super(SLMAdversarialLoss, self).__init__()
         self.model = model
         self.wl = wl
-        self.sampler = sampler
         
         self.min_len = min_len
         self.max_len = max_len
@@ -17,33 +16,14 @@ class SLMAdversarialLoss(torch.nn.Module):
         self.sig = sig
         self.skip_update = skip_update
         
-    def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
+    def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, ref_s):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
-        bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2) 
-        
-        if use_ind and np.random.rand() < 0.5:
-            s_preds = s_trg
-        else:
-            num_steps = np.random.randint(3, 5)
-            if ref_s is not None:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
-                      embedding_scale=1,
-                               features=ref_s, # reference from the same speaker as the embedding
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
-            else:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
-                      embedding_scale=1,
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
+        t_en = self.model.text_encoder(ref_text, ref_lengths, text_mask)
             
-        s_dur = s_preds[:, 128:]
-        s = s_preds[:, :128]
+        s_dur = ref_s[:, 128:]
+        #s = ref_s[:, :128] #Not used
         
-        d, _ = self.model.predictor(d_en, s_dur, 
+        d, _ = self.model.predictor(t_en, s_dur, 
                                                 ref_lengths, 
                                                 torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device), 
                                                 text_mask)
@@ -87,7 +67,7 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         asr_pred = t_en @ s2s_attn
 
-        _, p_pred = self.model.predictor(d_en, s_dur, 
+        _, p_pred = self.model.predictor(t_en, s_dur, 
                                                 ref_lengths, 
                                                 s2s_attn, 
                                                 text_mask)
@@ -112,7 +92,7 @@ class SLMAdversarialLoss(torch.nn.Module):
             if mel_length_gt <= mel_len or mel_length_pred <= mel_len:
                 continue
 
-            sp.append(s_preds[bib])
+            sp.append(ref_s[bib])
 
             random_start = np.random.randint(0, mel_length_pred - mel_len)
             en.append(asr_pred[bib, :, random_start:random_start+mel_len])

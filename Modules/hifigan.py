@@ -429,14 +429,14 @@ class Decoder(nn.Module):
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, upsample_initial_channel, style_dim, upsample=True))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
 
         self.F0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
         
         self.N_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
         
         self.asr_res = nn.Sequential(
-            weight_norm(nn.Conv1d(dim_in, 64, kernel_size=1)),
+            weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
         )
         
         
@@ -450,9 +450,9 @@ class Decoder(nn.Module):
             downlist = [0, 3, 7, 15]
             N_down = downlist[random.randint(0, 3)]
             if F0_down:
-                F0_curve = nn.functional.conv1d(F0_curve.unsqueeze(1), torch.ones(1, 1, F0_down).to('cuda'), padding=F0_down//2).squeeze(1) / F0_down
+                F0_curve = nn.functional.conv1d(F0_curve.unsqueeze(1), torch.ones(1, 1, F0_down).to(asr.device), padding=F0_down//2).squeeze(1) / F0_down
             if N_down:
-                N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to('cuda'), padding=N_down//2).squeeze(1)  / N_down
+                N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to(asr.device), padding=N_down//2).squeeze(1)  / N_down
 
         
         F0 = self.F0_conv(F0_curve.unsqueeze(1))

@@ -1,7 +1,8 @@
 __pycache__
-Utils/ASR/epoch_00080.pth
-*.pth
-Data/
-pretrained_data_vi.py
+Configs/
+Models/
+test/
+Models/
+venv/
+StyleTTS2-lite-infer/
 prepare_data_vi.py
-inference_vi_pro.py

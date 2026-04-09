@@ -1,28 +1,14 @@
-#coding:utf-8
-
-import os
-import os.path as osp
-
-import copy
-import math
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
+from torch.nn.utils import weight_norm
 
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
+from Modules.ASR.models import ASRCNN
+from Modules.JDC.model import JDCNet
+from Modules.discriminators import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 
-from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
-from Modules.diffusion.modules import Transformer1d, StyleTransformer1d
-from Modules.diffusion.diffusion import AudioDiffusionConditional
-
-from Modules.discriminators import MultiPeriodDiscriminator, MultiResSpecDiscriminator, WavLMDiscriminator
-
+import math
 from munch import Munch
-import yaml
 
 class LearnedDownSample(nn.Module):
     def __init__(self, layer_type, dim_in):
@@ -32,9 +18,9 @@ class LearnedDownSample(nn.Module):
         if self.layer_type == 'none':
             self.conv = nn.Identity()
         elif self.layer_type == 'timepreserve':
-            self.conv = spectral_norm(nn.Conv2d(dim_in, dim_in, kernel_size=(3, 1), stride=(2, 1), groups=dim_in, padding=(1, 0)))
+            self.conv = nn.Conv2d(dim_in, dim_in, kernel_size=(3, 1), stride=(2, 1), groups=dim_in, padding=(1, 0))
         elif self.layer_type == 'half':
-            self.conv = spectral_norm(nn.Conv2d(dim_in, dim_in, kernel_size=(3, 3), stride=(2, 2), groups=dim_in, padding=1))
+            self.conv = nn.Conv2d(dim_in, dim_in, kernel_size=(3, 3), stride=(2, 2), groups=dim_in, padding=1)
         else:
             raise RuntimeError('Got unexpected donwsampletype %s, expected is [none, timepreserve, half]' % self.layer_type)
             
@@ -105,13 +91,13 @@ class ResBlk(nn.Module):
         self._build_weights(dim_in, dim_out)
 
     def _build_weights(self, dim_in, dim_out):
-        self.conv1 = spectral_norm(nn.Conv2d(dim_in, dim_in, 3, 1, 1))
-        self.conv2 = spectral_norm(nn.Conv2d(dim_in, dim_out, 3, 1, 1))
+        self.conv1 = nn.Conv2d(dim_in, dim_in, 3, 1, 1)
+        self.conv2 = nn.Conv2d(dim_in, dim_out, 3, 1, 1)
         if self.normalize:
             self.norm1 = nn.InstanceNorm2d(dim_in, affine=True)
             self.norm2 = nn.InstanceNorm2d(dim_in, affine=True)
         if self.learned_sc:
-            self.conv1x1 = spectral_norm(nn.Conv2d(dim_in, dim_out, 1, 1, 0, bias=False))
+            self.conv1x1 = nn.Conv2d(dim_in, dim_out, 1, 1, 0, bias=False)
 
     def _shortcut(self, x):
         if self.learned_sc:
@@ -140,7 +126,7 @@ class StyleEncoder(nn.Module):
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
         blocks = []
-        blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
+        blocks += [nn.Conv2d(1, dim_in, 3, 1, 1)]
 
         repeat_num = 4
         for _ in range(repeat_num):
@@ -149,7 +135,7 @@ class StyleEncoder(nn.Module):
             dim_in = dim_out
 
         blocks += [nn.LeakyReLU(0.2)]
-        blocks += [spectral_norm(nn.Conv2d(dim_out, dim_out, 5, 1, 0))]
+        blocks += [nn.Conv2d(dim_out, dim_out, 5, 1, 0)]
         blocks += [nn.AdaptiveAvgPool2d(1)]
         blocks += [nn.LeakyReLU(0.2)]
         self.shared = nn.Sequential(*blocks)
@@ -174,38 +160,6 @@ class LinearNorm(torch.nn.Module):
 
     def forward(self, x):
         return self.linear_layer(x)
-
-class Discriminator2d(nn.Module):
-    def __init__(self, dim_in=48, num_domains=1, max_conv_dim=384, repeat_num=4):
-        super().__init__()
-        blocks = []
-        blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
-
-        for lid in range(repeat_num):
-            dim_out = min(dim_in*2, max_conv_dim)
-            blocks += [ResBlk(dim_in, dim_out, downsample='half')]
-            dim_in = dim_out
-
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [spectral_norm(nn.Conv2d(dim_out, dim_out, 5, 1, 0))]
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [nn.AdaptiveAvgPool2d(1)]
-        blocks += [spectral_norm(nn.Conv2d(dim_out, num_domains, 1, 1, 0))]
-        self.main = nn.Sequential(*blocks)
-
-    def get_feature(self, x):
-        features = []
-        for l in self.main:
-            x = l(x)
-            features.append(x) 
-        out = features[-1]
-        out = out.view(out.size(0), -1)  # (batch, num_domains)
-        return out, features
-
-    def forward(self, x):
-        out, features = self.get_feature(x)
-        out = out.squeeze()  # (batch)
-        return out, features
 
 class ResBlk1d(nn.Module):
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
@@ -311,7 +265,7 @@ class TextEncoder(nn.Module):
             
         x = x.transpose(1, 2)  # [B, T, chn]
 
-        input_lengths = input_lengths.cpu().numpy()
+        input_lengths = input_lengths.cpu()
         x = nn.utils.rnn.pack_padded_sequence(
             x, input_lengths, batch_first=True, enforce_sorted=False)
 
@@ -468,11 +422,8 @@ class ProsodyPredictor(nn.Module):
     def forward(self, texts, style, text_lengths, alignment, m):
         d = self.text_encoder(texts, style, text_lengths, m)
         
-        batch_size = d.shape[0]
-        text_size = d.shape[1]
-        
         # predict duration
-        input_lengths = text_lengths.cpu().numpy()
+        input_lengths = text_lengths.cpu()
         x = nn.utils.rnn.pack_padded_sequence(
             d, input_lengths, batch_first=True, enforce_sorted=False)
         
@@ -542,7 +493,7 @@ class DurationEncoder(nn.Module):
         x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
                 
         x = x.transpose(0, 1)
-        input_lengths = text_lengths.cpu().numpy()
+        input_lengths = text_lengths.cpu()
         x = x.transpose(-1, -2)
         
         for block in self.lstms:
@@ -580,39 +531,9 @@ class DurationEncoder(nn.Module):
         mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
         mask = torch.gt(mask+1, lengths.unsqueeze(1))
         return mask
-    
-def load_F0_models(path):
-    # load F0 model
 
-    F0_model = JDCNet(num_class=1, seq_len=192)
-    params = torch.load(path, map_location='cpu', weights_only=False)['net']
-    F0_model.load_state_dict(params)
-    _ = F0_model.train()
-    
-    return F0_model
-
-def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
-    # load ASR model
-    def _load_config(path):
-        with open(path) as f:
-            config = yaml.safe_load(f)
-        model_config = config['model_params']
-        return model_config
-
-    def _load_model(model_config, model_path):
-        model = ASRCNN(**model_config)
-        params = torch.load(model_path, map_location='cpu', weights_only=False)['model']
-        model.load_state_dict(params)
-        return model
-
-    asr_model_config = _load_config(ASR_MODEL_CONFIG)
-    asr_model = _load_model(asr_model_config, ASR_MODEL_PATH)
-    _ = asr_model.train()
-
-    return asr_model
-
-def build_model(args, text_aligner, pitch_extractor, bert):
-    assert args.decoder.type in ['istftnet', 'hifigan'], 'Decoder type unknown'
+def build_model(args):
+    assert args.decoder.type in ['istftnet', 'hifigan', 'vocos'], 'Decoder type unknown'
     
     if args.decoder.type == "istftnet":
         from Modules.istftnet import Decoder
@@ -623,7 +544,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes, 
                 gen_istft_n_fft=args.decoder.gen_istft_n_fft, gen_istft_hop_size=args.decoder.gen_istft_hop_size) 
-    else:
+    elif args.decoder.type == "hifigan":
         from Modules.hifigan import Decoder
         decoder = Decoder(dim_in=args.hidden_dim, style_dim=args.style_dim, dim_out=args.n_mels,
                 resblock_kernel_sizes = args.decoder.resblock_kernel_sizes,
@@ -631,83 +552,82 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
                 resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes) 
+    elif args.decoder.type == "vocos":
+        from Modules.vocos import Decoder
+        decoder = Decoder(dim_in=args.hidden_dim, style_dim=args.style_dim, dim_out=args.n_mels,
+                intermediate_dim=args.decoder.intermediate_dim,
+                num_layers=args.decoder.num_layers,
+                gen_istft_n_fft=args.decoder.gen_istft_n_fft,
+                gen_istft_hop_size=args.decoder.gen_istft_hop_size)
         
-    text_encoder = TextEncoder(channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token)
-    
-    predictor = ProsodyPredictor(style_dim=args.style_dim, d_hid=args.hidden_dim, nlayers=args.n_layer, max_dur=args.max_dur, dropout=args.dropout)
-    
-    style_encoder = StyleEncoder(dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim) # acoustic style encoder
-    predictor_encoder = StyleEncoder(dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim) # prosodic style encoder
-        
-    # define diffusion model
-    if args.multispeaker:
-        transformer = StyleTransformer1d(channels=args.style_dim*2, 
-                                    context_embedding_features=bert.config.hidden_size,
-                                    context_features=args.style_dim*2, 
-                                    **args.diffusion.transformer)
-    else:
-        transformer = Transformer1d(channels=args.style_dim*2, 
-                                    context_embedding_features=bert.config.hidden_size,
-                                    **args.diffusion.transformer)
-    
-    diffusion = AudioDiffusionConditional(
-        in_channels=1,
-        embedding_max_length=bert.config.max_position_embeddings,
-        embedding_features=bert.config.hidden_size,
-        embedding_mask_proba=args.diffusion.embedding_mask_proba, # Conditional dropout of batch elements,
-        channels=args.style_dim*2,
-        context_features=args.style_dim*2,
-    )
-    
-    diffusion.diffusion = KDiffusion(
-        net=diffusion.unet,
-        sigma_distribution=LogNormalDistribution(mean = args.diffusion.dist.mean, std = args.diffusion.dist.std),
-        sigma_data=args.diffusion.dist.sigma_data, # a placeholder, will be changed dynamically when start training diffusion model
-        dynamic_threshold=0.0 
-    )
-    diffusion.diffusion.net = transformer
-    diffusion.unet = transformer
-
-    
     nets = Munch(
-            bert=bert,
-            bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
-
-            predictor=predictor,
-            decoder=decoder,
-            text_encoder=text_encoder,
-
-            predictor_encoder=predictor_encoder,
-            style_encoder=style_encoder,
-            diffusion=diffusion,
-
-            text_aligner = text_aligner,
-            pitch_extractor=pitch_extractor,
+            decoder = decoder,
+            predictor    = ProsodyPredictor(style_dim=args.style_dim, d_hid=args.hidden_dim, nlayers=args.n_layer, max_dur=args.max_dur, dropout=args.dropout),
+            text_encoder = TextEncoder(channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token),
+            style_encoder   = StyleEncoder(dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim),# acoustic style encoder
+            text_aligner    = ASRCNN(input_dim=args.ASR_params.input_dim, hidden_dim=args.ASR_params.hidden_dim, n_token=args.n_token,
+                                   n_layers=args.ASR_params.n_layers, token_embedding_dim=args.ASR_params.token_embedding_dim), #ASR
+            pitch_extractor = JDCNet(num_class=args.JDC_params.num_class, seq_len=args.JDC_params.seq_len), #F0
 
             mpd = MultiPeriodDiscriminator(),
             msd = MultiResSpecDiscriminator(),
-        
-            # slm discriminator head
-            wd = WavLMDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
        )
     
     return nets
 
-def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
-    state = torch.load(path, map_location='cpu', weights_only=False)
+def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[], freeze_modules=[]):
+    print("\n")
+    state = torch.load(path, map_location='cpu')
     params = state['net']
+
     for key in model:
+        loaded_keys = list(params[key].keys())
+        loaded_has_module = loaded_keys[0].startswith('module.')
+        model_keys = list(model[key].state_dict().keys())
+        model_has_module = model_keys[0].startswith('module.')
+
         if key in params and key not in ignore_modules:
-            print('%s loaded' % key)
-            model[key].load_state_dict(params[key], strict=False)
+            try:
+                model[key].load_state_dict(params[key], strict=True)
+            except Exception as e:
+                from collections import OrderedDict
+                state_dict = params[key]
+                new_state_dict = OrderedDict()
+                if not loaded_has_module and model_has_module:
+                    print("Loading non-DP weights into DP model")
+                    #Add module
+                    for k, v in state_dict.items():
+                        # If key already has module. leave it otherwise add it
+                        new_key = k if k.startswith('module.') else 'module.' + k
+                        new_state_dict[new_key] = v
+                    model[key].load_state_dict(new_state_dict, strict=True)# load params
+                elif loaded_has_module and not model_has_module:
+                    print("Loading DP weights into non-DP model")
+                    #Remove module
+                    for k, v in state_dict.items():
+                        name = k[7:] # remove `module.`
+                        new_state_dict[name] = v
+                    model[key].load_state_dict(new_state_dict, strict=True)# load params
+                else:
+                    print(e)
+            print('%s Loaded' % key)
+        if key in freeze_modules:
+            for param in model[key].parameters():
+                param.requires_grad = False
+            print('%s Freezed' % key)
+        if key in ignore_modules:
+            print('%s Ignored' % key)
+
     _ = [model[key].eval() for key in model]
     
     if not load_only_params:
+        print('\nLoading old optimizer')
         epoch = state["epoch"]
         iters = state["iters"]
         optimizer.load_state_dict(state["optimizer"])
     else:
+        print('\nNOT Loading old optimizer')
         epoch = 0
         iters = 0
-        
+
     return model, optimizer, epoch, iters

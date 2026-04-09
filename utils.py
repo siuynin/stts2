@@ -67,7 +67,23 @@ def recursive_munch(d):
         return [recursive_munch(v) for v in d]
     else:
         return d
-    
+
+def freeze_except_excluded(munch_model, exclude_layers):
+    """
+    Recursively traverse the Munch model and freeze all layers except those in exclude_layers.
+    """
+    for key, module in munch_model.items():
+        if isinstance(module, nn.Module):  # Check if it's a PyTorch layer
+            for param in module.parameters():
+                if module not in exclude_layers:
+                    param.requires_grad = False  # Freeze
+                else:
+                    print(f"Layer {key} remains trainable.")
+        
+        # If it's a nested Munch, recurse
+        elif isinstance(module, Munch):
+            freeze_except_excluded(module, exclude_layers)
+
 def log_print(message, logger):
     logger.info(message)
     print(message)
